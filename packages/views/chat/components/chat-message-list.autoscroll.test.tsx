@@ -433,7 +433,7 @@ describe("ChatMessageList auto-scroll", () => {
   // conversation and the next one jumped. Readiness is judged from the
   // newest row's own box, because during the estimate the scroll geometry
   // reports the viewport as being at the live end.
-  it("stays visible while the newest message is still settling", () => {
+  it("shows a skeleton until the newest message has actually landed at the bottom", () => {
     const { view, scroll } = renderStreamingChat();
 
     const box = (el: Element, top: number, bottom: number) => {
@@ -443,12 +443,24 @@ describe("ChatMessageList auto-scroll", () => {
     const liveEndRow = view.container.querySelector("[data-chat-live-end]");
     if (!liveEndRow) throw new Error("the newest row is not marked as the live end");
 
-    expect(scroll.el.className).not.toContain("invisible");
-    expect(view.queryByRole("button", { name: "Jump to latest" })).toBeNull();
+    const frames = (count: number) => {
+      for (let i = 0; i < count; i++) act(() => renderFrame());
+    };
+
+    expect(scroll.el.className).toContain("invisible");
+    expect(view.container.querySelectorAll(".space-y-5").length).toBeGreaterThan(0);
+
+    box(liveEndRow, 4600, 5200);
+    frames(20);
+    expect(scroll.el.className).toContain("invisible");
 
     box(liveEndRow, VIEWPORT - 200, VIEWPORT - 16);
-    for (let i = 0; i < 20; i++) act(() => renderFrame());
+    frames(2);
+    expect(scroll.el.className).toContain("invisible");
+
+    frames(20);
     expect(scroll.el.className).not.toContain("invisible");
+    expect(view.container.querySelector(".space-y-5")).toBeNull();
   });
 
   // A row settling after its first paint — an image decoding, a code block
@@ -464,6 +476,7 @@ describe("ChatMessageList auto-scroll", () => {
     if (!liveEndRow) throw new Error("the newest row is not marked as the live end");
     box(liveEndRow, VIEWPORT - 200, VIEWPORT - 16);
     for (let i = 0; i < 20; i++) act(() => renderFrame());
+    expect(scroll.el.className).not.toContain("invisible");
 
     scroll.readerScrollsTo(400);
     fireResizeObservers();

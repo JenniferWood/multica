@@ -337,10 +337,10 @@ export function ChatMessageList({
       // The gutter lives on the scroll container, so it applies once to the
       // whole list — rows, header, footer — and the scrollbar still rides the
       // surface edge rather than being inset with the text.
-      // Stay visible while Virtuoso measures. Hiding this container until the
-      // live-end probe settles leaves the conversation pane blank for up to a
-      // second after the messages have already arrived.
-      className={cn("h-full overflow-y-auto", CHAT_GUTTER)}
+      // Keep the real rows hidden until Virtuoso has measured and corrected
+      // its initial estimate. A skeleton covers that interval so the pane is
+      // not blank, without exposing a frame at the wrong scroll position.
+      className={cn("h-full overflow-y-auto", CHAT_GUTTER, !hasReachedLiveEnd && "invisible")}
     >
       {/* Already inside the gutter + column, so this pre-mount frame renders the
        *  skeleton BODY rather than <ChatMessageSkeleton>, which brings its own
@@ -414,6 +414,13 @@ export function ChatMessageList({
       </RichContentScrollRootProvider>
       )}
     </div>
+      {!hasReachedLiveEnd ? (
+        <div className={cn("absolute inset-0 bg-surface-raised", CHAT_GUTTER)}>
+          <div className={cn(CHAT_COLUMN, "pt-4")}>
+            <ChatSkeletonBody />
+          </div>
+        </div>
+      ) : null}
       {hasReachedLiveEnd && isAwayFromLiveEnd ? <JumpToLatest onJump={pinToLiveEnd} /> : null}
     </div>
     </PreviewSequenceProvider>
