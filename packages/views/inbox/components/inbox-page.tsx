@@ -120,6 +120,10 @@ export function InboxPage() {
 
   const [selectedKey, setSelectedKeyState] = useState(() => urlIssue);
   const [view, setViewState] = useState<InboxView>(() => urlView);
+  // The row the user opened under the unread filter. Opening it marks it read,
+  // so the filter would otherwise drop the row before the detail finishes
+  // mounting. Scoped to the selection: moving away releases it.
+  const pinnedUnreadKeyRef = useRef<string | null>(null);
 
   // Sync from URL when searchParams change (e.g. navigation)
   useEffect(() => {
@@ -151,7 +155,14 @@ export function InboxPage() {
   // The paginated endpoint guarantees the projection, including on empty pages.
   const priorityFilterSupport = isArchivedView ? "supported" : inboxPriorityFilterSupport(rawItems);
   const effectiveFilters = useMemo(() => inboxFiltersForPrioritySupport(filters, priorityFilterSupport), [filters, priorityFilterSupport]);
-  const visibleItems = useMemo(() => filterInboxItems(viewItems, effectiveFilters), [viewItems, effectiveFilters]);
+  const pinnedUnreadKey =
+    effectiveFilters.unreadOnly && pinnedUnreadKeyRef.current === selectedKey
+      ? selectedKey
+      : null;
+  const visibleItems = useMemo(
+    () => filterInboxItems(viewItems, effectiveFilters, pinnedUnreadKey),
+    [viewItems, effectiveFilters, pinnedUnreadKey],
+  );
   const hasActiveFilters = inboxFilterCount(effectiveFilters) > 0;
   const selectedOnPage = viewItems.find((i) => (i.issue_id ?? i.id) === selectedKey);
   // A deep link can point beyond every loaded page. Resolve its group directly
@@ -163,8 +174,8 @@ export function InboxPage() {
   const lookupItems = useMemo(() => deduplicateArchivedInboxItems(lookup.data?.items ?? []), [lookup.data]);
   const selectionItems = useMemo(() => {
     if (!isArchivedView || selectedOnPage) return visibleItems;
-    return [...visibleItems, ...filterInboxItems(lookupItems, effectiveFilters)];
-  }, [isArchivedView, selectedOnPage, visibleItems, lookupItems, effectiveFilters]);
+    return [...visibleItems, ...filterInboxItems(lookupItems, effectiveFilters, pinnedUnreadKey)];
+  }, [isArchivedView, selectedOnPage, visibleItems, lookupItems, effectiveFilters, pinnedUnreadKey]);
   const selected = selectionItems.find((i) => (i.issue_id ?? i.id) === selectedKey) ?? null;
   const selectedInView = selectedOnPage ?? (isArchivedView ? lookupItems.find((i) => (i.issue_id ?? i.id) === selectedKey) : null);
   const selectionFilteredOut = !!selectedKey && !!selectedInView && !selected;
@@ -311,6 +322,7 @@ export function InboxPage() {
   useEffect(() => {
     if (!selectedId || selectedRead) return;
     if (manualUnreadIdRef.current === selectedId) return;
+    if (filters.unreadOnly) pinnedUnreadKeyRef.current = selectedKey;
     markReadMutate(selectedId, {
       onError: (err) =>
         toast.error(
@@ -319,14 +331,17 @@ export function InboxPage() {
             : t(($) => $.errors.mark_read_failed),
         ),
     });
-  }, [selectedId, selectedRead, markReadMutate, t]);
+  }, [selectedId, selectedRead, selectedKey, filters.unreadOnly, markReadMutate, t]);
 
-  // Release the guard as soon as the selection moves off the parked row.
+  // Release the guards as soon as the selection moves off their row.
   useEffect(() => {
     if (manualUnreadIdRef.current && manualUnreadIdRef.current !== selectedId) {
       manualUnreadIdRef.current = null;
     }
-  }, [selectedId]);
+    if (pinnedUnreadKeyRef.current && pinnedUnreadKeyRef.current !== selectedKey) {
+      pinnedUnreadKeyRef.current = null;
+    }
+  }, [selectedId, selectedKey]);
 
   const writeViewState = useViewStateWriter();
   // Bumped when the already-open notification row is re-clicked; threaded to
