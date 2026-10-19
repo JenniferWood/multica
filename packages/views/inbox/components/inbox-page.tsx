@@ -9,7 +9,7 @@ import {
   useRef,
 } from "react";
 import { useDefaultLayout } from "react-resizable-panels";
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { ApiError, errorCode } from "@multica/core/api";
 import { useWorkspacePaths } from "@multica/core/paths";
@@ -107,6 +107,7 @@ const INBOX_LIST_MIN_SIZE = 240;
 const INBOX_LIST_MAX_SIZE = 400;
 
 export function InboxPage() {
+  const queryClient = useQueryClient();
   const { t } = useT("inbox");
   const showIssueLimitUpgradePrompt = useIssueLimitUpgradePrompt();
   const showAutopilotQuotaRecoveryPrompt = useIssueLimitUpgradePrompt(
@@ -159,7 +160,7 @@ export function InboxPage() {
     effectiveFilters.unreadOnly && pinnedUnreadKeyRef.current === selectedKey
       ? selectedKey
       : null;
-  const visibleItems = useMemo(
+  const filteredItems = useMemo(
     () => filterInboxItems(viewItems, effectiveFilters, pinnedUnreadKey),
     [viewItems, effectiveFilters, pinnedUnreadKey],
   );
@@ -173,9 +174,13 @@ export function InboxPage() {
   });
   const lookupItems = useMemo(() => deduplicateArchivedInboxItems(lookup.data?.items ?? []), [lookup.data]);
   const selectionItems = useMemo(() => {
-    if (!isArchivedView || selectedOnPage) return visibleItems;
-    return [...visibleItems, ...filterInboxItems(lookupItems, effectiveFilters, pinnedUnreadKey)];
-  }, [isArchivedView, selectedOnPage, visibleItems, lookupItems, effectiveFilters, pinnedUnreadKey]);
+    if (!isArchivedView || selectedOnPage) return filteredItems;
+    return deduplicateArchivedInboxItems([
+      ...filteredItems,
+      ...filterInboxItems(lookupItems, effectiveFilters, pinnedUnreadKey),
+    ]);
+  }, [isArchivedView, selectedOnPage, filteredItems, lookupItems, effectiveFilters, pinnedUnreadKey]);
+  const visibleItems = isArchivedView && pinnedUnreadKey ? selectionItems : filteredItems;
   const selected = selectionItems.find((i) => (i.issue_id ?? i.id) === selectedKey) ?? null;
   const selectedInView = selectedOnPage ?? (isArchivedView ? lookupItems.find((i) => (i.issue_id ?? i.id) === selectedKey) : null);
   const selectionFilteredOut = !!selectedKey && !!selectedInView && !selected;
@@ -322,7 +327,16 @@ export function InboxPage() {
   useEffect(() => {
     if (!selectedId || selectedRead) return;
     if (manualUnreadIdRef.current === selectedId) return;
-    if (filters.unreadOnly) pinnedUnreadKeyRef.current = selectedKey;
+    if (filters.unreadOnly) {
+      pinnedUnreadKeyRef.current = selectedKey;
+      if (isArchivedView && selected) {
+        // The unread page drops this group on refetch. Seed its lookup before
+        // the mutation so cache patches, rollback and deletion apply to it too.
+        queryClient.setQueryData(archivedInboxLookupOptions(wsId, selectedKey).queryKey, {
+          items: [selected], hasMore: false, nextCursor: null,
+        });
+      }
+    }
     markReadMutate(selectedId, {
       onError: (err) =>
         toast.error(
@@ -331,7 +345,7 @@ export function InboxPage() {
             : t(($) => $.errors.mark_read_failed),
         ),
     });
-  }, [selectedId, selectedRead, selectedKey, filters.unreadOnly, markReadMutate, t]);
+  }, [selectedId, selectedRead, selectedKey, selected, filters.unreadOnly, isArchivedView, queryClient, wsId, markReadMutate, t]);
 
   // Release the guards as soon as the selection moves off their row.
   useEffect(() => {
