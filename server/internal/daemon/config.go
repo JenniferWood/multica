@@ -178,8 +178,8 @@ type Overrides struct {
 	// AgentTimeout is a pointer so an explicit `--agent-timeout 0` (no cap) is
 	// distinguishable from "flag not passed". nil = use env/default.
 	AgentTimeout                   *time.Duration
-	AgentIdleWatchdog             *time.Duration
-	AgentToolWatchdog             *time.Duration
+	AgentIdleWatchdog              *time.Duration
+	AgentToolWatchdog              *time.Duration
 	CodexSemanticInactivityTimeout time.Duration
 	CodexHandshakeTimeout          time.Duration
 	MaxConcurrentTasks             int

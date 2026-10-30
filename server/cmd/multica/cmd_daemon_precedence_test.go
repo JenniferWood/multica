@@ -267,13 +267,13 @@ func TestResolveDaemonWatchdogOverridePrecedence(t *testing.T) {
 		return cmd
 	}
 	cases := []struct {
-		name       string
-		flagChgd   bool
-		flag       time.Duration
-		env        string
-		cfg        string
-		want       *time.Duration
-		errSub     string
+		name     string
+		flagChgd bool
+		flag     time.Duration
+		env      string
+		cfg      string
+		want     *time.Duration
+		errSub   string
 	}{
 		{name: "explicit zero flag", flagChgd: true, want: durationPtr(0)},
 		{name: "cfg positive", cfg: "15m", want: durationPtr(15 * time.Minute)},
