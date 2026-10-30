@@ -30,14 +30,16 @@ import (
 // (and accept the lifecycle risk) can keep the feature enabled by setting
 // `MULTICA_CODEX_MULTI_AGENT=1` in the daemon environment.
 //
-// Two switches are required. Codex selects the multi-agent version per
-// model: an explicit config override wins, otherwise the model catalog's
+// Newer Codex releases select the multi-agent version per model:
+// an explicit config override wins, otherwise the model catalog's
 // `multi_agent_version` is used. `features.multi_agent = false` is not an
 // override, so catalog-v2 models (gpt-5.6-sol, gpt-6.x) still receive
-// spawn_agent / send_message / followup_task. Only `agents.enabled = false`
-// forces the Disabled version, and it also wins over a version already
-// recorded on a resumed thread. `features.multi_agent = false` stays for
-// models that fall back to the feature flags.
+// spawn_agent / send_message / followup_task. `agents.enabled = false`
+// forces the Disabled version even on resumed threads, unless
+// `features.multi_agent_v2 = true` overrides it. Disable both for Codex
+// 0.145.0 and later. Older releases can interpret agents.enabled as a custom
+// role and reject its boolean value; unknown versions keep the legacy
+// feature-only block.
 //
 // Layout note
 //
@@ -88,12 +90,12 @@ var (
 	// matches a top-level `[features]` table header, allowing TOML's optional
 	// whitespace inside brackets and inline comments after the header.
 	rootFeaturesTableHeaderRe = regexp.MustCompile(`^\s*\[\s*features\s*\]\s*(?:#.*)?$`)
-	// matches `multi_agent = ...` (with optional whitespace) inside a
+	// matches either multi-agent feature (with optional whitespace) inside a
 	// `[features]` table.
-	featuresTableMultiAgentRe = regexp.MustCompile(`^\s*multi_agent\s*=`)
-	// matches `features.multi_agent = ...` at the TOML root (top-level
+	featuresTableMultiAgentRe = regexp.MustCompile(`^\s*multi_agent(?:_v2)?\s*=`)
+	// matches either multi-agent feature at the TOML root (top-level
 	// dotted-key form, including TOML's optional whitespace around dots).
-	rootDottedMultiAgentRe = regexp.MustCompile(`^\s*features\s*\.\s*multi_agent\s*=`)
+	rootDottedMultiAgentRe = regexp.MustCompile(`^\s*features\s*\.\s*multi_agent(?:_v2)?\s*=`)
 	// matches a top-level `[agents]` table header. `[agents.<role>]`
 	// sub-tables do not match.
 	rootAgentsTableHeaderRe = regexp.MustCompile(`^\s*\[\s*agents\s*\]\s*(?:#.*)?$`)
@@ -114,10 +116,15 @@ func codexMultiAgentEnabled() bool {
 	return false
 }
 
+func codexAgentsEnabledSupported(detectedVersion string) bool {
+	version, err := parseCodexSemver(detectedVersion)
+	return err == nil && !version.lessThan(codexSemver{Minor: 145})
+}
+
 // renderMulticaMultiAgentBlock returns the daemon-managed multi-agent
 // block. The body uses `multi_agent = false` when injected inside a
 // `[features]` table, and `features.multi_agent = false` otherwise.
-func renderMulticaMultiAgentBlock(inFeaturesTable bool) string {
+func renderMulticaMultiAgentBlock(inFeaturesTable, disableV2 bool) string {
 	var b strings.Builder
 	b.WriteString(multicaMultiAgentBeginMarker)
 	b.WriteString("\n")
@@ -125,6 +132,13 @@ func renderMulticaMultiAgentBlock(inFeaturesTable bool) string {
 		b.WriteString("multi_agent = false\n")
 	} else {
 		b.WriteString("features.multi_agent = false\n")
+	}
+	if disableV2 {
+		if inFeaturesTable {
+			b.WriteString("multi_agent_v2 = false\n")
+		} else {
+			b.WriteString("features.multi_agent_v2 = false\n")
+		}
 	}
 	b.WriteString(multicaMultiAgentEndMarker)
 	b.WriteString("\n")
@@ -151,9 +165,9 @@ func renderMulticaAgentsBlock(inAgentsTable bool) string {
 // stripUserMultiAgentDirectives removes user-written directives that would
 // conflict with the managed blocks:
 //
-//   - `features.multi_agent = ...` and `agents.enabled = ...` at the TOML
-//     root (dotted-key form).
-//   - `multi_agent = ...` inside a top-level `[features]` table.
+//   - `features.multi_agent`, `features.multi_agent_v2` and `agents.enabled`
+//     at the TOML root (dotted-key form).
+//   - `multi_agent` and `multi_agent_v2` inside a top-level `[features]` table.
 //   - `enabled = ...` inside a top-level `[agents]` table.
 //
 // Other tables (`[features.experimental]`, `[agents.researcher]`,
@@ -217,8 +231,8 @@ func hasRootFeaturesTable(content string) bool {
 // immediately after the first `[features]` header line. Caller must have
 // already stripped any prior managed block and any user-set `multi_agent`
 // directive from inside the table.
-func injectManagedBlockIntoFeaturesTable(content string) string {
-	return injectAfterHeader(content, rootFeaturesTableHeaderRe, renderMulticaMultiAgentBlock(true))
+func injectManagedBlockIntoFeaturesTable(content string, disableV2 bool) string {
+	return injectAfterHeader(content, rootFeaturesTableHeaderRe, renderMulticaMultiAgentBlock(true, disableV2))
 }
 
 // hasRootAgentsTable reports whether the file contains a top-level
@@ -243,7 +257,7 @@ func hasRootAgentsTable(content string) bool {
 // accepts the lifecycle risk. Toggling the env var across prepare runs is
 // not supported: the per-task config is short-lived (recreated per task),
 // so users should set the var once at daemon start.
-func ensureCodexMultiAgentConfig(configPath string, logger *slog.Logger) error {
+func ensureCodexMultiAgentConfig(configPath, detectedVersion string, logger *slog.Logger) error {
 	if codexMultiAgentEnabled() {
 		if logger != nil {
 			logger.Info("codex multi-agent: leaving Codex native multi-agent untouched per MULTICA_CODEX_MULTI_AGENT",
@@ -267,23 +281,24 @@ func ensureCodexMultiAgentConfig(configPath string, logger *slog.Logger) error {
 	// the canonical forms below.
 	existing = stripUserMultiAgentDirectives(existing)
 
+	supportsAgentsEnabled := codexAgentsEnabledSupported(detectedVersion)
 	hasFeatures := hasRootFeaturesTable(existing)
 	hasAgents := hasRootAgentsTable(existing)
 
 	// In-table injections happen first so the root-prepended blocks land
 	// at the very top of the file (above any user tables).
 	if hasFeatures {
-		existing = injectManagedBlockIntoFeaturesTable(existing)
+		existing = injectManagedBlockIntoFeaturesTable(existing, supportsAgentsEnabled)
 	}
-	if hasAgents {
+	if supportsAgentsEnabled && hasAgents {
 		existing = injectAfterHeader(existing, rootAgentsTableHeaderRe, renderMulticaAgentsBlock(true))
 	}
 
 	var prepend strings.Builder
 	if !hasFeatures {
-		prepend.WriteString(renderMulticaMultiAgentBlock(false))
+		prepend.WriteString(renderMulticaMultiAgentBlock(false, supportsAgentsEnabled))
 	}
-	if !hasAgents {
+	if supportsAgentsEnabled && !hasAgents {
 		prepend.WriteString(renderMulticaAgentsBlock(false))
 	}
 	prependStr := prepend.String()
