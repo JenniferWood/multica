@@ -21,10 +21,11 @@ func parseTOML(t *testing.T, content string) map[string]any {
 	return parsed
 }
 
-// requireMultiAgentDisabled asserts that the parsed config has
-// features.multi_agent set to false.
+// requireMultiAgentDisabled asserts that the parsed config has both
+// features.multi_agent and agents.enabled set to false.
 func requireMultiAgentDisabled(t *testing.T, parsed map[string]any) {
 	t.Helper()
+	requireAgentsDisabled(t, parsed)
 	features, ok := parsed["features"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected `features` table in parsed config, got: %#v", parsed["features"])
@@ -35,6 +36,24 @@ func requireMultiAgentDisabled(t *testing.T, parsed map[string]any) {
 	}
 	if v {
 		t.Errorf("expected features.multi_agent = false, got true")
+	}
+}
+
+// requireAgentsDisabled asserts that the parsed config has agents.enabled
+// set to false, the only switch that disables Codex multi-agent for models
+// whose catalog entry selects multi-agent v2.
+func requireAgentsDisabled(t *testing.T, parsed map[string]any) {
+	t.Helper()
+	agents, ok := parsed["agents"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected `agents` table in parsed config, got: %#v", parsed["agents"])
+	}
+	v, ok := agents["enabled"].(bool)
+	if !ok {
+		t.Fatalf("expected agents.enabled to be a bool, got: %#v", agents["enabled"])
+	}
+	if v {
+		t.Errorf("expected agents.enabled = false, got true")
 	}
 }
 
@@ -410,6 +429,19 @@ experimental_thinking = true
 [profiles.default]
 model = "o3"
 `,
+		"in_agents_table": `[agents]
+enabled = true
+max_threads = 4
+
+[agents.researcher]
+description = "Research-focused role."
+`,
+		"features_and_agents_tables": `[features]
+multi_agent = true
+
+[agents]
+max_threads = 4
+`,
 	}
 	for name, original := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -565,5 +597,154 @@ experimental_thinking = true
 	features := parsed["features"].(map[string]any)
 	if v, _ := features["experimental_thinking"].(bool); !v {
 		t.Errorf("expected user's features.experimental_thinking preserved, got %v", features["experimental_thinking"])
+	}
+}
+
+func TestEnsureCodexMultiAgentConfigEmptyFileWritesAgentsDisabled(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+
+	if err := ensureCodexMultiAgentConfig(configPath, nil); err != nil {
+		t.Fatalf("ensureCodexMultiAgentConfig failed: %v", err)
+	}
+
+	data, _ := os.ReadFile(configPath)
+	got := string(data)
+	for _, want := range []string{multicaAgentsBeginMarker, "agents.enabled = false", multicaAgentsEndMarker} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, got)
+		}
+	}
+	requireMultiAgentDisabled(t, parseTOML(t, got))
+}
+
+func TestEnsureCodexMultiAgentConfigAgentsTable(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	original := `[agents]
+enabled = true
+max_threads = 4
+
+[agents.researcher]
+description = "Research-focused role."
+enabled = true
+`
+	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	if err := ensureCodexMultiAgentConfig(configPath, nil); err != nil {
+		t.Fatalf("ensureCodexMultiAgentConfig failed: %v", err)
+	}
+
+	data, _ := os.ReadFile(configPath)
+	got := string(data)
+	if strings.Contains(got, "agents.enabled = false") {
+		t.Errorf("managed block must NOT use root dotted-key form when [agents] table exists; got:\n%s", got)
+	}
+
+	parsed := parseTOML(t, got)
+	requireMultiAgentDisabled(t, parsed)
+	agents := parsed["agents"].(map[string]any)
+	if v, _ := agents["max_threads"].(int64); v != 4 {
+		t.Errorf("expected agents.max_threads preserved, got %#v", agents["max_threads"])
+	}
+	role, _ := agents["researcher"].(map[string]any)
+	if v, _ := role["enabled"].(bool); !v {
+		t.Errorf("expected [agents.researcher] keys preserved, got %#v", role)
+	}
+}
+
+func TestEnsureCodexMultiAgentConfigDottedAgentsEnabled(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	original := `model = "o3"
+agents . enabled = true
+`
+	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	if err := ensureCodexMultiAgentConfig(configPath, nil); err != nil {
+		t.Fatalf("ensureCodexMultiAgentConfig failed: %v", err)
+	}
+
+	data, _ := os.ReadFile(configPath)
+	got := string(data)
+	if strings.Contains(got, "agents . enabled = true") {
+		t.Errorf("expected user agents.enabled = true to be stripped, got:\n%s", got)
+	}
+	requireMultiAgentDisabled(t, parseTOML(t, got))
+}
+
+func TestEnsureCodexMultiAgentConfigAgentsRoleSubtableOnly(t *testing.T) {
+	t.Parallel()
+
+	// A role sub-table implicitly creates `agents` without a bare `[agents]`
+	// header, so the root dotted-key form is still valid TOML.
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	original := `[agents.researcher]
+description = "Research-focused role."
+`
+	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	if err := ensureCodexMultiAgentConfig(configPath, nil); err != nil {
+		t.Fatalf("ensureCodexMultiAgentConfig failed: %v", err)
+	}
+
+	data, _ := os.ReadFile(configPath)
+	got := string(data)
+	if !strings.Contains(got, "agents.enabled = false") {
+		t.Errorf("expected root dotted-key form when only role sub-tables exist, got:\n%s", got)
+	}
+	parsed := parseTOML(t, got)
+	requireMultiAgentDisabled(t, parsed)
+	role, _ := parsed["agents"].(map[string]any)["researcher"].(map[string]any)
+	if v, _ := role["description"].(string); v != "Research-focused role." {
+		t.Errorf("expected [agents.researcher] preserved, got %#v", role)
+	}
+}
+
+// Configs written by daemons before agents.enabled was managed carry only
+// the multi-agent block; the next prepare must add the agents block.
+func TestEnsureCodexMultiAgentConfigUpgradesLegacyManagedBlock(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	original := `model = "o3"
+
+[features]
+` + multicaMultiAgentBeginMarker + `
+multi_agent = false
+` + multicaMultiAgentEndMarker + `
+unified_exec = false
+`
+	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	if err := ensureCodexMultiAgentConfig(configPath, nil); err != nil {
+		t.Fatalf("ensureCodexMultiAgentConfig failed: %v", err)
+	}
+
+	data, _ := os.ReadFile(configPath)
+	got := string(data)
+	if n := strings.Count(got, multicaMultiAgentBeginMarker); n != 1 {
+		t.Errorf("expected exactly one multi-agent block, got %d:\n%s", n, got)
+	}
+	parsed := parseTOML(t, got)
+	requireMultiAgentDisabled(t, parsed)
+	if v, _ := parsed["features"].(map[string]any)["unified_exec"].(bool); v {
+		t.Errorf("expected features.unified_exec preserved as false, got:\n%s", got)
 	}
 }
